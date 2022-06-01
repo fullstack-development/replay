@@ -1,0 +1,84 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.34.4.
+--
+-- see: https://github.com/sol/hpack
+
+name:           replay
+version:        0.1.0.20220514
+description:    Please see the README on GitHub at <https://github.com/fullstack-development/replay#readme>
+homepage:       https://github.com/fullstack-development/replay#readme
+bug-reports:    https://github.com/fullstack-development/replay/issues
+author:         Evgeny Osipenko
+maintainer:     evgeny.osipenko@metalamp.io
+copyright:      2022 Evgeny Osipenko
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+    ChangeLog.md
+
+source-repository head
+  type: git
+  location: https://github.com/fullstack-development/replay
+
+library
+  exposed-modules:
+      Control.Record
+      Database.Beam.Traced
+      Database.Beam.Traced.AST
+      Database.Beam.Traced.Syntax
+      Database.Beam.Traced.Syntax.TH
+  other-modules:
+      Paths_replay
+  hs-source-dirs:
+      src
+  ghc-options: -Wall
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , beam-core
+    , beam-postgres
+    , bytestring
+    , containers
+    , exceptions
+    , mtl
+    , stm
+    , template-haskell
+    , text
+    , time
+    , transformers
+    , unordered-containers
+    , yaml
+  default-language: Haskell2010
+
+test-suite reducible-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Control.ReducibleSpec
+      Paths_replay
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      QuickCheck
+    , aeson
+    , base >=4.7 && <5
+    , beam-core
+    , beam-postgres
+    , bytestring
+    , containers
+    , exceptions
+    , hspec
+    , mtl
+    , replay
+    , stm
+    , template-haskell
+    , text
+    , time
+    , transformers
+    , unordered-containers
+    , yaml
+  default-language: Haskell2010

@@ -1,0 +1,58 @@
+name:                replay
+version:             0.1.0.20220514
+github:              "fullstack-development/replay"
+license:             BSD3
+author:              "Evgeny Osipenko"
+maintainer:          "evgeny.osipenko@metalamp.io"
+copyright:           "2022 Evgeny Osipenko"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description: Please see the README on GitHub at <https://github.com/fullstack-development/replay#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- aeson
+- beam-core
+- beam-postgres
+- bytestring
+- containers
+- exceptions
+- mtl
+- stm
+- template-haskell
+- text
+- time
+- transformers
+- unordered-containers
+- yaml
+
+library:
+  source-dirs: src
+  # other-modules:
+    # - Control.Reducible.Internal.TH
+    # - Control.Reducible.Example
+  ghc-options:
+  - -Wall
+
+tests:
+  reducible-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - replay
+    - QuickCheck
+    - hspec
