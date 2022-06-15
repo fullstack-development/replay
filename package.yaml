@@ -27,7 +27,10 @@ dependencies:
 - bytestring
 - containers
 - exceptions
+- free
 - mtl
+- postgresql-simple
+- reducible
 - stm
 - template-haskell
 - text

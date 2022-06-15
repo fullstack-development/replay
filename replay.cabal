@@ -25,9 +25,10 @@ source-repository head
 
 library
   exposed-modules:
+      A
       Control.Record
       Database.Beam.Traced
-      Database.Beam.Traced.AST
+      Database.Beam.Traced.QBuilder
       Database.Beam.Traced.Syntax
       Database.Beam.Traced.Syntax.TH
   other-modules:
@@ -43,7 +44,10 @@ library
     , bytestring
     , containers
     , exceptions
+    , free
     , mtl
+    , postgresql-simple
+    , reducible
     , stm
     , template-haskell
     , text
@@ -71,8 +75,11 @@ test-suite reducible-test
     , bytestring
     , containers
     , exceptions
+    , free
     , hspec
     , mtl
+    , postgresql-simple
+    , reducible
     , replay
     , stm
     , template-haskell

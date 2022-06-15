@@ -25,6 +25,17 @@ packages:
       sha256: a536b7c320720222256895d2ebe27fef547514e4ddc6cc1e971b1286c4974155
   original:
     hackage: beam-migrate-0.5.1.2@sha256:e385a2ddb213398aca38a4f15334613057552b83a467a81c0dc3562c49a59884,4923
+- completed:
+    name: reducible
+    version: 0.1.0.20220514
+    git: https://github.com/fullstack-development/reducible
+    pantry-tree:
+      size: 1085
+      sha256: 0daaf9a06770fbe0d9394b7034ace7c82e473ce760866ad141c966a0c8ac486b
+    commit: 895473bbf67518f3f9933d67799243fef246cbd7
+  original:
+    git: https://github.com/fullstack-development/reducible
+    commit: 895473bbf67518f3f9933d67799243fef246cbd7
 snapshots:
 - completed:
     size: 586268

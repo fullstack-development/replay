@@ -20,14 +20,16 @@ import Database.Beam.Traced.Syntax.TH
 import Data.Proxy
 import qualified Data.Aeson as Aeson
 
+type TracedSyntax = ParallelSyntax SyntaxAST
+
 data ParallelSyntax sa sb = ParallelSyntax sa sb
     deriving (Show, Eq)
 
-parallelSyntaxA :: ParallelSyntax sa sb -> sa
-parallelSyntaxA (ParallelSyntax sa _) = sa
+getAst :: ParallelSyntax sa sb -> sa
+getAst (ParallelSyntax sa _) = sa
 
-parallelSyntaxB :: ParallelSyntax sa sb -> sb
-parallelSyntaxB (ParallelSyntax _ sb) = sb
+getSyn :: ParallelSyntax sa sb -> sb
+getSyn (ParallelSyntax _ sb) = sb
 
 newtype SyntaxAST = SyntaxAST { unwrapSyntaxAST :: Aeson.Value }
     deriving (Show, Eq)
@@ -37,8 +39,8 @@ buildSyntaxInstances
     (BuildContext
         ''ParallelSyntax
         'ParallelSyntax
-        'parallelSyntaxA
-        'parallelSyntaxB
+        'getAst
+        'getSyn
         ''SyntaxAST
         'SyntaxAST
     )
@@ -100,8 +102,8 @@ instance
 
     deleteStmt name mbAlias mbWhere =
         ParallelSyntax
-            (deleteStmt (parallelSyntaxA name) mbAlias (fmap parallelSyntaxA mbWhere))
-            (deleteStmt (parallelSyntaxB name) mbAlias (fmap parallelSyntaxB mbWhere))
+            (deleteStmt (getAst name) mbAlias (fmap getAst mbWhere))
+            (deleteStmt (getSyn name) mbAlias (fmap getSyn mbWhere))
     deleteSupportsAlias _ =
         deleteSupportsAlias (Proxy :: Proxy sa) &&
         deleteSupportsAlias (Proxy :: Proxy sb)
@@ -128,6 +130,9 @@ instance IsSql92DeleteSyntax SyntaxAST where
 
 instance (Aeson.ToJSON ty) => HasSqlValueSyntax SyntaxAST ty where
     sqlValueSyntax x = SyntaxAST (Aeson.toJSON x)
+
+instance {-# OVERLAPPING #-} HasSqlValueSyntax SyntaxAST SqlNull where
+    sqlValueSyntax SqlNull = SyntaxAST (Aeson.String "SqlNull")
 
 {-
 instance
