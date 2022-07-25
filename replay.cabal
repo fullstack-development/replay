@@ -25,12 +25,16 @@ source-repository head
 
 library
   exposed-modules:
-      A
       Control.Record
       Database.Beam.Traced
       Database.Beam.Traced.QBuilder
       Database.Beam.Traced.Syntax
       Database.Beam.Traced.Syntax.TH
+      Encoding
+      Servant.Client.Test
+      Servant.Client.Traced
+      Servant.Client.Traced.RandomId
+      Servant.Client.Traced.SerializedByteString
   other-modules:
       Paths_replay
   hs-source-dirs:
@@ -38,22 +42,41 @@ library
   ghc-options: -Wall
   build-depends:
       aeson
+    , async
     , base >=4.7 && <5
+    , base-encoding
     , beam-core
     , beam-postgres
+    , binary
     , bytestring
+    , case-insensitive
     , containers
+    , cryptonite
+    , deepseq
     , exceptions
     , free
+    , http-client
+    , http-media
+    , http-types
+    , kan-extensions
     , mtl
     , postgresql-simple
     , reducible
+    , servant
+    , servant-client
+    , servant-client-core
+    , servant-server
+    , servant-websockets
     , stm
+    , streaming-commons
     , template-haskell
     , text
     , time
     , transformers
     , unordered-containers
+    , wai
+    , warp
+    , websockets
     , yaml
   default-language: Haskell2010
 
@@ -69,23 +92,42 @@ test-suite reducible-test
   build-depends:
       QuickCheck
     , aeson
+    , async
     , base >=4.7 && <5
+    , base-encoding
     , beam-core
     , beam-postgres
+    , binary
     , bytestring
+    , case-insensitive
     , containers
+    , cryptonite
+    , deepseq
     , exceptions
     , free
     , hspec
+    , http-client
+    , http-media
+    , http-types
+    , kan-extensions
     , mtl
     , postgresql-simple
     , reducible
     , replay
+    , servant
+    , servant-client
+    , servant-client-core
+    , servant-server
+    , servant-websockets
     , stm
+    , streaming-commons
     , template-haskell
     , text
     , time
     , transformers
     , unordered-containers
+    , wai
+    , warp
+    , websockets
     , yaml
   default-language: Haskell2010

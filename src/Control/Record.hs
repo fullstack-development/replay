@@ -12,6 +12,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -33,10 +34,13 @@ import Control.Applicative
 import Control.Concurrent.STM
 import Control.Monad.Catch
 import Control.Monad.Reader
+import Control.Monad.State.Strict
 import Data.Foldable
 import Data.Functor.Identity
 import Data.IORef
 import Data.Maybe
+import Data.Monoid
+import Data.Proxy
 import Data.Sequence (Seq (..))
 import Data.String (IsString)
 import Data.Text (Text)
@@ -47,12 +51,17 @@ import qualified Control.Monad.Catch.Pure as Catch
 import qualified Control.Reducible as Reducible
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as BS.Char8
+import qualified Data.ByteString.Lazy.Char8 as BS.Lazy.Char8
+import qualified Data.Char as Char
+import qualified Data.HashMap.Strict as HashMap
 import qualified Data.IntSet as IntSet
+import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
 import qualified Data.Yaml.Pretty as Yaml.Pretty
+import qualified Data.Yaml.TH as Yaml.TH
 
 
 
@@ -75,9 +84,31 @@ data Result e a
     | Success a
     deriving (Show, Eq, Ord, Generic)
 
-instance (Aeson.ToJSON e, Aeson.ToJSON a) => Aeson.ToJSON (Result e a)
+instance (Aeson.ToJSON e, Aeson.ToJSON a) => Aeson.ToJSON (Result e a) where
+    toJSON = Aeson.genericToJSON (aesonOptions 0)
+    toEncoding = Aeson.genericToEncoding (aesonOptions 0)
 
-instance (Aeson.FromJSON e, Aeson.FromJSON a) => Aeson.FromJSON (Result e a)
+instance (Aeson.FromJSON e, Aeson.FromJSON a) => Aeson.FromJSON (Result e a) where
+    parseJSON = Aeson.genericParseJSON (aesonOptions 0)
+
+
+
+data TextTagged a = TextTagged Text a
+    deriving (Show, Eq, Ord, Generic)
+
+instance (Aeson.ToJSON a) => Aeson.ToJSON (TextTagged a) where
+    toJSON (TextTagged tag value) =
+        Aeson.object [tag Aeson..= value]
+    toEncoding (TextTagged tag value) =
+        Aeson.pairs (tag Aeson..= value)
+
+instance (Aeson.FromJSON a) => Aeson.FromJSON (TextTagged a) where
+    parseJSON = Aeson.withObject "TextTagged" $ \obj -> do
+        case HashMap.toList obj of
+            [(key, _)] -> do
+                value <- obj Aeson..: key
+                pure (TextTagged key value)
+            _ -> fail "expected an object with single field"
 
 
 
@@ -118,49 +149,58 @@ renderYaml =
   where
     yamlConfig =
         Yaml.Pretty.setConfCompare compare $
-        Yaml.Pretty.setConfDropNull True $
         Yaml.Pretty.defConfig
 
 
 
-
-newtype ActionId = ActionId Int
-    deriving newtype (Aeson.ToJSON, Aeson.FromJSON)
-
-newtype ActionType = ActionType Text
-    deriving newtype (IsString, Aeson.ToJSON, Aeson.FromJSON)
-
-data TraceRequest = TraceRequest
-    { traceRequestDomain :: Text
-    , traceRequestTime :: Int
-    , traceRequestBody :: Aeson.Value
-    , traceRequestResult :: Aeson.Value
+aesonOptions :: Int -> Aeson.Options
+aesonOptions conPrefixLen = Aeson.defaultOptions
+    { Aeson.sumEncoding = Aeson.ObjectWithSingleField
+    , Aeson.constructorTagModifier = \ct ->
+        lowerHead $ List.drop conPrefixLen ct
     }
-    deriving (Generic)
+  where
+    lowerHead [] = []
+    lowerHead (c : cs)
+        | Char.toLower c == c =
+            c : cs
+        | otherwise =
+            Char.toLower c : lowerHead cs
 
-instance Aeson.ToJSON TraceRequest
 
-instance Aeson.FromJSON TraceRequest
 
-data TraceEffect = TraceEffect
-    { traceEffectBody :: Aeson.Value
-    }
-    deriving (Generic)
 
-instance Aeson.ToJSON TraceEffect
+-- data TraceEventRequest = TraceEventRequest
+    -- { traceRequestDomain :: Text
+    -- , traceRequestTime :: Int
+    -- , traceRequestBody :: Aeson.Value
+    -- , traceRequestResult :: Aeson.Value
+    -- }
+    -- deriving (Generic)
 
-instance Aeson.FromJSON TraceEffect
+-- instance Aeson.ToJSON TraceEventRequest
 
-data TraceSyncPoint = TraceSyncPoint
-    { traceSyncPointDomain :: Text
-    , traceSyncPointTime :: Int
-    , traceSyncPointMarker :: Aeson.Value
-    }
-    deriving (Generic)
+-- instance Aeson.FromJSON TraceEventRequest
 
-instance Aeson.ToJSON TraceSyncPoint
+-- data TraceEventEffect = TraceEventEffect
+    -- { traceEffectBody :: Aeson.Value
+    -- }
+    -- deriving (Generic)
 
-instance Aeson.FromJSON TraceSyncPoint
+-- instance Aeson.ToJSON TraceEventEffect
+
+-- instance Aeson.FromJSON TraceEventEffect
+
+-- data TraceEventSyncPoint = TraceEventSyncPoint
+    -- { traceSyncPointDomain :: Text
+    -- , traceSyncPointTime :: Int
+    -- , traceSyncPointMarker :: Aeson.Value
+    -- }
+    -- deriving (Generic)
+
+-- instance Aeson.ToJSON TraceEventSyncPoint
+
+-- instance Aeson.FromJSON TraceEventSyncPoint
 
 
 
@@ -177,27 +217,33 @@ newtype RecorderBaseT m (a :: *) = RecorderBaseT
 
 
 data TraceEvent
-    = TraceEventRequest Text Aeson.Value Aeson.Value
+    = TraceEventRequest Aeson.Value Aeson.Value
     | TraceEventEffect Aeson.Value
-    | TraceEventSyncPoint Text Aeson.Value
-    deriving (Generic)
+    | TraceEventSyncPoint Aeson.Value
+    deriving (Show, Eq, Ord, Generic)
 
-instance Aeson.ToJSON TraceEvent
+instance Aeson.ToJSON TraceEvent where
+    toJSON = Aeson.genericToJSON
+        (aesonOptions (Text.length "TraceEvent"))
+    toEncoding = Aeson.genericToEncoding
+        (aesonOptions (Text.length "TraceEvent"))
 
-instance Aeson.FromJSON TraceEvent
+instance Aeson.FromJSON TraceEvent where
+    parseJSON = Aeson.genericParseJSON
+        (aesonOptions (Text.length "TraceEvent"))
 
 
 
-data TraceData = TraceData
-    { traceDataRequests :: Map.Map (Text, Aeson.Value) (Seq (Int, Aeson.Value))
-    , traceDataEffects :: Seq Aeson.Value
-    , traceDataSyncPoints :: Map.Map Text (Seq (Int, Aeson.Value))
-    }
-    deriving (Generic)
+-- data TraceData = TraceData
+    -- { traceDataRequests :: Map.Map (Text, Aeson.Value) (Seq (Int, Aeson.Value))
+    -- , traceDataEffects :: Seq Aeson.Value
+    -- , traceDataSyncPoints :: Map.Map Text (Seq (Int, Aeson.Value))
+    -- }
+    -- deriving (Generic)
 
-instance Aeson.ToJSON TraceData
+-- instance Aeson.ToJSON TraceData
 
-instance Aeson.FromJSON TraceData
+-- instance Aeson.FromJSON TraceData
 
 
 
@@ -256,106 +302,335 @@ instance Aeson.FromJSON TraceData
 
 
 
--- class
-    -- ( Type.Typeable d
-    -- , Ord (TraceDomainRequest d)
-    -- , Eq (TraceDomainEffect d)
-    -- , Ord (TraceDomainSyncPoint d)
-    -- , Aeson.FromJSON (TraceDomainRequest d)
-    -- , Aeson.FromJSON (TraceDomainResult d)
-    -- , Aeson.FromJSON (TraceDomainEffect d)
-    -- , Aeson.FromJSON (TraceDomainSyncPoint d)
-    -- , Aeson.ToJSON (TraceDomainRequest d)
-    -- , Aeson.ToJSON (TraceDomainResult d)
-    -- , Aeson.ToJSON (TraceDomainEffect d)
-    -- , Aeson.ToJSON (TraceDomainSyncPoint d)
-    -- ) =>
-    -- TraceDomain (d :: k)
-  -- where
-    -- data TraceDomainRequest d
-    -- data TraceDomainResult d
-    -- data TraceDomainEffect d
-    -- data TraceDomainSyncPoint d
+class
+    ( Type.Typeable d
+    , Ord (TraceDomainRequest d)
+    , Eq (TraceDomainEffect d)
+    , Ord (TraceDomainSyncPoint d)
+    , Aeson.FromJSON (TraceDomainRequest d)
+    , Aeson.FromJSON (TraceDomainError d)
+    , Aeson.FromJSON (TraceDomainEffect d)
+    , Aeson.FromJSON (TraceDomainSyncPoint d)
+    , Aeson.ToJSON (TraceDomainRequest d)
+    , Aeson.ToJSON (TraceDomainError d)
+    , Aeson.ToJSON (TraceDomainEffect d)
+    , Aeson.ToJSON (TraceDomainSyncPoint d)
+    ) =>
+    TraceDomain (d :: k)
+  where
+    data TraceDomainRequest d
+    data TraceDomainError d
+    data TraceDomainEffect d
+    data TraceDomainSyncPoint d
+    traceDomainErrorFromException ::
+        Maybe SomeException ->
+        Maybe (TraceDomainError d)
+    traceDomainErrorToException ::
+        TraceDomainError d ->
+        SomeException
+
+domainName :: forall d. (TraceDomain d) => Proxy d -> Text
+domainName _ = Text.pack $ show $ Type.typeRep @d
+
+noRequest :: Maybe (TraceDomainRequest d, Void)
+noRequest = Nothing
 
 
+
+finallyRecordingWith ::
+    forall r d m a.
+    (TraceDomain d, Aeson.ToJSON r, MonadIO m, MonadMask m) =>
+    RecordTrace ->
+    TraceDomainRequest d ->
+    m a ->
+    (a -> m (Maybe r)) ->
+    m a
+finallyRecordingWith rt key inner encoder = do
+    atExit inner $ \ec -> do
+        mbResult <-
+            case ec of
+                ExitCaseSuccess x -> do
+                    eiMbValue <- try $ encoder x
+                    case eiMbValue of
+                        Left ex -> do
+                            liftIO $ putStrLn $
+                                "Exception while encoding a result: " <>
+                                displayException (ex :: SomeException)
+                            pure Nothing
+                        Right mbValue ->
+                            pure (Success <$> mbValue)
+                ExitCaseException ex ->
+                    pure (Failure <$> traceDomainErrorFromException (Just ex))
+                ExitCaseAbort ->
+                    pure (Failure <$> traceDomainErrorFromException Nothing)
+        case mbResult :: Maybe (Result (TraceDomainError d) r) of
+            Nothing -> pure ()
+            Just result ->
+                liftIO $ recordTraceEventRaw rt $
+                    TextTagged (domainName $ Proxy @d) $
+                        TraceEventRequest
+                            (Aeson.toJSON key)
+                            (Aeson.toJSON result)
+
+finallyRecording ::
+    forall r d m.
+    (TraceDomain d, Aeson.ToJSON r, MonadIO m, MonadMask m) =>
+    RecordTrace ->
+    TraceDomainRequest d ->
+    m r ->
+    m r
+finallyRecording rt key inner = do
+    finallyRecordingWith rt key inner (pure . Just)
+
+recordTraceEventRequestResult ::
+    forall d m r.
+    (TraceDomain d, Aeson.ToJSON r, MonadIO m) =>
+    RecordTrace ->
+    TraceDomainRequest d ->
+    r ->
+    m ()
+recordTraceEventRequestResult rt key result = do
+    liftIO $ recordTraceEventRaw rt $
+        TextTagged (domainName $ Proxy @d) $
+            TraceEventRequest
+                (Aeson.toJSON key)
+                (Aeson.toJSON (Success @Void @r result))
+
+recordTraceEventRequestError ::
+    forall d m.
+    (TraceDomain d, MonadIO m) =>
+    RecordTrace ->
+    TraceDomainRequest d ->
+    TraceDomainError d ->
+    m ()
+recordTraceEventRequestError rt key err = do
+    liftIO $ recordTraceEventRaw rt $
+        TextTagged (domainName $ Proxy @d) $
+            TraceEventRequest
+                (Aeson.toJSON key)
+                (Aeson.toJSON (Failure @(TraceDomainError d) @Void err))
+
+recordTraceEventEffect ::
+    forall d m.
+    (TraceDomain d, MonadIO m) =>
+    RecordTrace ->
+    TraceDomainEffect d ->
+    m ()
+recordTraceEventEffect rt effect = do
+    liftIO $ recordTraceEventRaw rt $
+        TextTagged (domainName $ Proxy @d) $
+            TraceEventEffect (Aeson.toJSON effect)
+
+recordTraceEventSyncPoint ::
+    forall d m.
+    (TraceDomain d, MonadIO m) =>
+    RecordTrace ->
+    TraceDomainSyncPoint d ->
+    m ()
+recordTraceEventSyncPoint rt marker = do
+    liftIO $ recordTraceEventRaw rt $
+        TextTagged (domainName $ Proxy @d) $
+            TraceEventSyncPoint (Aeson.toJSON marker)
 
 -- recordTraceEvent ::
-    -- forall d m.
-    -- (TraceDomain d, MonadRecorderBase m) =>
-    -- Maybe (TraceDomainRequest d, TraceDomainResult d) ->
+    -- forall d r m.
+    -- (TraceDomain d, Aeson.ToJSON r, MonadRecorderBase m) =>
+    -- RecordTrace ->
+    -- Maybe (TraceDomainRequest d, r) ->
     -- Maybe (TraceDomainEffect d) ->
     -- Maybe (TraceDomainSyncPoint d) ->
     -- m ()
--- recordTraceEvent mbDomainKeyValue mbDomainEffect mbDomainMarker = do
-    -- baseWithRecordTrace $ \rt -> do
-        -- liftIO $ recordTraceRecordEvent
-            -- rt
-            -- (Text.pack $ show $ Type.typeRep @d)
-            -- (fmap
-                -- (\(k, v) -> (Aeson.toJSON k, Aeson.toJSON v))
-                -- mbDomainKeyValue
-            -- )
-            -- (fmap Aeson.toJSON mbDomainEffect)
-            -- (fmap Aeson.toJSON mbDomainMarker)
+-- recordTraceEvent rt mbDomainKeyValue mbDomainEffect mbDomainMarker = do
+    -- liftIO $ recordTraceEventRaw
+        -- rt
+        -- (Text.pack $ show $ Type.typeRep @d)
+        -- (fmap
+            -- (\(k, v) -> (Aeson.toJSON k, Aeson.toJSON v))
+            -- mbDomainKeyValue
+        -- )
+        -- (fmap Aeson.toJSON mbDomainEffect)
+        -- (fmap Aeson.toJSON mbDomainMarker)
 
 
+
+-- data RecordTrace = RecordTrace
+    -- { recordTraceTimeTableTVar ::
+        -- TVar (Map.Map Text Int)
+    -- , recordTraceSyncPointSetTVar ::
+        -- TVar (Set.Set (Text, Aeson.Value, Int))
+    -- , recordTraceRequestMapTVar ::
+        -- TVar (Map.Map (Text, Aeson.Value, Int) Aeson.Value)
+    -- , recordTraceEffectListTVar ::
+        -- TVar (Seq (Text, Aeson.Value))
+    -- }
 
 data RecordTrace = RecordTrace
-    { recordTraceTimeTableTVar ::
-        TVar (Map.Map Text Int)
-    , recordTraceSyncPointSetTVar ::
-        TVar (Set.Set (Text, Aeson.Value, Int))
-    , recordTraceRequestMapTVar ::
-        TVar (Map.Map (Text, Aeson.Value, Int) Aeson.Value)
-    , recordTraceEffectListTVar ::
-        TVar (Seq Aeson.Value)
+    { recordTraceCurrentRequestMapTVar ::
+        TVar (Map.Map Text (Map.Map Aeson.Value Aeson.Value))
+    , recordTraceEventLogTVar ::
+        TVar (Seq (TextTagged TraceEvent))
     }
 
 
 
-recordTraceRecordEvent ::
+recordTraceEventRaw ::
     RecordTrace ->
-    Text ->
-    Maybe (Aeson.Value, Aeson.Value) ->
-    Maybe Aeson.Value ->
-    Maybe Aeson.Value ->
+    TextTagged TraceEvent ->
     IO ()
-recordTraceRecordEvent rt domain mbKeyValue mbEffect mbMarker = do
+recordTraceEventRaw rt traceEvent = do
     mbBadValueMessage <- atomically $ do
-        badValueMessageTVar <- newTVar Nothing
-        oldTimeTable <- readTVar (recordTraceTimeTableTVar rt)
-        let oldTime =
-                fromMaybe 0 $
-                Map.lookup domain oldTimeTable
-        oldReqMap <- readTVar (recordTraceRequestMapTVar rt)
-        forM_ mbKeyValue $ \(rkey, rvalue) -> do
-            let (isBadReqValue, newReqMap) =
-                    Map.alterF @((,) Bool)
-                        (maybe
-                            (False, Just rvalue)
-                            (\oldValue -> (oldValue /= rvalue, Just rvalue))
-                        )
-                        (domain, rkey, oldTime)
-                        oldReqMap
-            when isBadReqValue $ do
-                writeTVar badValueMessageTVar $
-                    Just $
-                        "Inconsistent trace, ignoring value for " <>
-                        Text.unpack domain <> "@" <> show oldTime <> "\n" <>
-                        BS.Char8.unpack (renderYaml (rkey, rvalue))
-            writeTVar (recordTraceRequestMapTVar rt) $! newReqMap
-        forM_ mbEffect $ \effect -> do
-            modifyTVar' (recordTraceEffectListTVar rt)
-                (:|> effect)
-        forM_ mbMarker $ \marker -> do
-            let newTime = oldTime + 1
-            modifyTVar' (recordTraceSyncPointSetTVar rt)
-                (Set.insert (domain, marker, newTime))
-            writeTVar (recordTraceTimeTableTVar rt) $!
-                Map.insert domain newTime oldTimeTable
-        readTVar badValueMessageTVar
-    forM_ mbBadValueMessage $ \message ->
+        modifyTVar'
+            (recordTraceEventLogTVar rt)
+            (:|> traceEvent)
+        case traceEvent of
+            TextTagged domain (TraceEventRequest key newValue) -> do
+                oldReqMap <- readTVar
+                    (recordTraceCurrentRequestMapTVar rt)
+                case Map.lookup key =<< Map.lookup domain oldReqMap of
+                    Nothing -> do
+                        writeTVar
+                            (recordTraceCurrentRequestMapTVar rt) $!
+                            (Map.insertWith
+                                (<>)
+                                domain
+                                (Map.singleton key newValue)
+                                oldReqMap
+                            )
+                        pure Nothing
+                    Just oldValue
+                        | oldValue == newValue ->
+                            pure Nothing
+                        | otherwise ->
+                            pure $ Just $
+                                "Inconsistent request results detected." <>
+                                "\nMaybe add a sync point to signify " <>
+                                "a change of state?" <>
+                                "\nDomain: " <>
+                                Text.unpack domain <>
+                                "\nKey:\n" <>
+                                BS.Char8.unpack (renderYaml [key]) <>
+                                "Old value:\n" <>
+                                BS.Char8.unpack (renderYaml [oldValue]) <>
+                                "New value:\n" <>
+                                BS.Char8.unpack (renderYaml [newValue])
+            TextTagged domain (TraceEventSyncPoint _) -> do
+                modifyTVar'
+                    (recordTraceCurrentRequestMapTVar rt)
+                    (Map.delete domain)
+                pure Nothing
+            _ ->
+                pure Nothing
+    forM_ @Maybe mbBadValueMessage $ \message ->
         putStrLn message
+
+
+
+-- recordTraceEventRaw ::
+    -- RecordTrace ->
+    -- Text ->
+    -- Maybe (Aeson.Value, Aeson.Value) ->
+    -- Maybe Aeson.Value ->
+    -- Maybe Aeson.Value ->
+    -- IO ()
+-- recordTraceEventRaw rt domain mbKeyValue mbEffect mbMarker = do
+    -- mbBadValueMessage <- atomically $ do
+        -- badValueMessageTVar <- newTVar Nothing
+        -- oldTimeTable <- readTVar (recordTraceTimeTableTVar rt)
+        -- let oldTime =
+                -- fromMaybe 0 $
+                -- Map.lookup domain oldTimeTable
+        -- oldReqMap <- readTVar (recordTraceRequestMapTVar rt)
+        -- forM_ mbKeyValue $ \(rkey, rvalue) -> do
+            -- let (isBadReqValue, newReqMap) =
+                    -- Map.alterF @((,) Bool)
+                        -- (maybe
+                            -- (False, Just rvalue)
+                            -- (\oldValue -> (oldValue /= rvalue, Just rvalue))
+                        -- )
+                        -- (domain, rkey, oldTime)
+                        -- oldReqMap
+            -- when isBadReqValue $ do
+                -- writeTVar badValueMessageTVar $
+                    -- Just $
+                        -- "Inconsistent trace, ignoring value for " <>
+                        -- Text.unpack domain <> "@" <> show oldTime <> "\n" <>
+                        -- BS.Char8.unpack (renderYaml (rkey, rvalue))
+            -- writeTVar (recordTraceRequestMapTVar rt) $! newReqMap
+        -- forM_ mbEffect $ \effect -> do
+            -- modifyTVar' (recordTraceEffectListTVar rt)
+                -- (:|> (domain, effect))
+        -- forM_ mbMarker $ \marker -> do
+            -- let newTime = oldTime + 1
+            -- modifyTVar' (recordTraceSyncPointSetTVar rt)
+                -- (Set.insert (domain, marker, newTime))
+            -- writeTVar (recordTraceTimeTableTVar rt) $!
+                -- Map.insert domain newTime oldTimeTable
+        -- readTVar badValueMessageTVar
+    -- forM_ mbBadValueMessage $ \message ->
+        -- putStrLn message
+
+
+
+-- rawRecordTraceEventRequest ::
+    -- RecordTrace ->
+    -- Text ->
+    -- Aeson.Value ->
+    -- Aeson.Value ->
+    -- IO ()
+-- rawRecordTraceEventRequest rt domain rawKey rawValue = do
+    -- mbBadValueMessage <- atomically $ do
+        -- oldTimeTable <- readTVar (recordTraceTimeTableTVar rt)
+        -- let oldTime =
+                -- fromMaybe 0 $
+                -- Map.lookup domain oldTimeTable
+        -- oldReqMap <- readTVar (recordTraceRequestMapTVar rt)
+        -- let (isBadReqValue, newReqMap) =
+                -- Map.alterF @((,) Bool)
+                    -- (maybe
+                        -- (False, Just rawValue)
+                        -- (\oldValue -> (oldValue /= rawValue, Just rawValue))
+                    -- )
+                    -- (domain, rawKey, oldTime)
+                    -- oldReqMap
+        -- let mbBadValueMessage =
+                -- if isBadReqValue
+                    -- then Just $
+                        -- "Inconsistent trace, ignoring value for " <>
+                        -- Text.unpack domain <> "@" <> show oldTime <> "\n" <>
+                        -- BS.Char8.unpack (renderYaml (rawKey, rawValue))
+                    -- else Nothing
+        -- writeTVar (recordTraceRequestMapTVar rt) $! newReqMap
+        -- pure mbBadValueMessage
+    -- forM_ mbBadValueMessage $ \message ->
+        -- putStrLn message
+
+-- rawRecordTraceEventEffect ::
+    -- RecordTrace ->
+    -- Text ->
+    -- Aeson.Value ->
+    -- IO ()
+-- rawRecordTraceEventEffect rt domain rawEffect = do
+    -- atomically $ do
+        -- modifyTVar' (recordTraceEffectListTVar rt)
+            -- (:|> (domain, rawEffect))
+
+-- rawRecordTraceEventSyncPoint ::
+    -- RecordTrace ->
+    -- Text ->
+    -- Aeson.Value ->
+    -- IO ()
+-- rawRecordTraceEventSyncPoint rt domain rawMarker = do
+    -- atomically $ do
+        -- oldTimeTable <- readTVar (recordTraceTimeTableTVar rt)
+        -- let oldTime =
+                -- fromMaybe 0 $
+                -- Map.lookup domain oldTimeTable
+        -- let newTime = oldTime + 1
+        -- modifyTVar' (recordTraceSyncPointSetTVar rt)
+            -- (Set.insert (domain, rawMarker, newTime))
+        -- writeTVar (recordTraceTimeTableTVar rt) $!
+            -- Map.insert domain newTime oldTimeTable
+
 
 
 
@@ -390,22 +665,15 @@ instance MonadRecorderBase IO where
         acquire =
             RecordTrace
                 <$> newTVarIO Map.empty
-                <*> newTVarIO Set.empty
-                <*> newTVarIO Map.empty
                 <*> newTVarIO Seq.empty
         release rt = do
-            (tt, sps, rm, el) <- atomically $
-                (,,,)
-                    <$> readTVar (recordTraceTimeTableTVar rt)
-                    <*> readTVar (recordTraceSyncPointSetTVar rt)
-                    <*> readTVar (recordTraceRequestMapTVar rt)
-                    <*> readTVar (recordTraceEffectListTVar rt)
-            BS.Char8.putStrLn $ renderYaml (tt, sps, rm, el)
-            -- eventLog <- atomically $ readTVar (recordTraceEventLogTVar rt)
-            -- traceData <- constructTraceData eventLog
-            -- BS.Char8.putStrLn $ renderYaml eventLog
-            -- BS.Char8.putStrLn $ renderYaml traceData
-            pure ()
+            -- (rm, evl) <- atomically $
+                -- (,)
+                    -- <$> readTVar (recordTraceCurrentRequestMapTVar rt)
+                    -- <*> readTVar (recordTraceEventLogTVar rt)
+            -- BS.Char8.putStrLn $ renderYaml (fmap Map.toList rm, evl)
+            evl <- atomically $ readTVar (recordTraceEventLogTVar rt)
+            BS.Char8.putStrLn $ renderYaml evl
     -- baseRecordTraceEvent rt event =
         -- atomically $ do
             -- modifyTVar' (recordTraceEventLogTVar rt) (:|> event)
@@ -445,22 +713,6 @@ class Monad m => MonadKeyValue m where
         (b -> Text -> Text -> m (b, Text)) ->
         m b
 
--- instance TraceDomain MonadKeyValue where
-    -- data TraceDomainRequest MonadKeyValue
-        -- = MonadKeyValueRequestGetKV Text
-        -- | MonadKeyValueRequestTraverseKV
-        -- deriving (Generic, Aeson.ToJSON, Aeson.FromJSON)
-    -- data TraceDomainResult MonadKeyValue
-        -- deriving (Generic, Aeson.ToJSON, Aeson.FromJSON)
-    -- data TraceDomainEffect MonadKeyValue
-        -- = MonadKeyValueEffectSetKV Text Text
-        -- | MonadKeyValueEffectTraverseKV (Map.Map Text Text)
-        -- deriving (Generic, Aeson.ToJSON, Aeson.FromJSON)
-    -- data TraceDomainSyncPoint MonadKeyValue
-        -- = MonadKeyValueSyncPointSetKV
-        -- | MonadKeyValueSyncPointTraverseKV
-        -- deriving (Generic, Aeson.ToJSON, Aeson.FromJSON)
-
 
 
 instance (MonadIO m, MonadMask m) => MonadKeyValue (ReaderT (TMVar (Map.Map Text Text)) m) where
@@ -496,34 +748,85 @@ instance (MonadIO m, MonadMask m) => MonadKeyValue (ReaderT (TMVar (Map.Map Text
 
 
 
+instance TraceDomain MonadKeyValue where
+    data TraceDomainRequest MonadKeyValue
+        = MonadKeyValueRequestGetKV Text
+        | MonadKeyValueRequestTraverseKV
+        deriving (Eq, Ord, Generic)
+    data TraceDomainError MonadKeyValue
+        = MonadKeyValueError Void
+        deriving (Eq, Ord, Generic, Aeson.ToJSON, Aeson.FromJSON)
+    data TraceDomainEffect MonadKeyValue
+        = MonadKeyValueEffectSetKV Text Text
+        | MonadKeyValueEffectTraverseKV (Map.Map Text Text)
+        deriving (Eq, Ord, Generic)
+    data TraceDomainSyncPoint MonadKeyValue
+        = MonadKeyValueSyncPointSetKV
+        | MonadKeyValueSyncPointTraverseKV
+        deriving (Eq, Ord, Generic)
+    traceDomainErrorFromException _ = Nothing
+    traceDomainErrorToException (MonadKeyValueError v) = absurd v
+
+instance Aeson.ToJSON (TraceDomainRequest MonadKeyValue) where
+    toJSON = Aeson.genericToJSON
+        (aesonOptions (Text.length "MonadKeyValueRequest"))
+    toEncoding = Aeson.genericToEncoding
+        (aesonOptions (Text.length "MonadKeyValueRequest"))
+
+instance Aeson.FromJSON (TraceDomainRequest MonadKeyValue) where
+    parseJSON = Aeson.genericParseJSON
+        (aesonOptions (Text.length "MonadKeyValueRequest"))
+
+instance Aeson.ToJSON (TraceDomainEffect MonadKeyValue) where
+    toJSON = Aeson.genericToJSON
+        (aesonOptions (Text.length "MonadKeyValueEffect"))
+    toEncoding = Aeson.genericToEncoding
+        (aesonOptions (Text.length "MonadKeyValueEffect"))
+
+instance Aeson.FromJSON (TraceDomainEffect MonadKeyValue) where
+    parseJSON = Aeson.genericParseJSON
+        (aesonOptions (Text.length "MonadKeyValueEffect"))
+
+instance Aeson.ToJSON (TraceDomainSyncPoint MonadKeyValue) where
+    toJSON = Aeson.genericToJSON
+        (aesonOptions (Text.length "MonadKeyValueSyncPoint"))
+    toEncoding = Aeson.genericToEncoding
+        (aesonOptions (Text.length "MonadKeyValueSyncPoint"))
+
+instance Aeson.FromJSON (TraceDomainSyncPoint MonadKeyValue) where
+    parseJSON = Aeson.genericParseJSON
+        (aesonOptions (Text.length "MonadKeyValueSyncPoint"))
+
 instance (MonadRecorderBase m, MonadKeyValue m) => MonadKeyValue (RecordT m) where
     getKV k = RecordT $ \rt -> do
-        v <- getKV k
-        liftIO $ recordTraceRecordEvent rt "MonadKeyValue"
-            (Just (Aeson.toJSON ["getKV", k], Aeson.toJSON v))
-            Nothing
-            Nothing
-        pure v
+        finallyRecording rt
+            (MonadKeyValueRequestGetKV k)
+            (getKV k)
     setKV k v = RecordT $ \rt -> do
-        liftIO $ recordTraceRecordEvent rt "MonadKeyValue"
-            Nothing
-            (Just (Aeson.toJSON ("setKV" :: Text, k, v)))
-            (Just "setKV")
+        recordTraceEventEffect rt
+            (MonadKeyValueEffectSetKV k v)
+        recordTraceEventSyncPoint rt
+            MonadKeyValueSyncPointSetKV
         setKV k v
     traverseKVSatisfying cond b0 fn = RecordT $ \rt -> do
         raccum <- liftIO $ newIORef Seq.empty
         waccum <- liftIO $ newIORef Map.empty
-        br <- traverseKVSatisfying cond b0 $ \b1 k v1 -> do
-            liftIO $ modifyIORef' raccum (:|> (k, v1))
-            (b2, v2) <- runRecordT (fn b1 k v1) rt
-            liftIO $ modifyIORef' waccum (Map.insert k v2)
-            pure (b2, v2)
-        rseq <- liftIO $ readIORef raccum
+        br <- finallyRecordingWith rt
+            MonadKeyValueRequestTraverseKV
+            (traverseKVSatisfying cond b0 $ \b1 k v1 -> do
+                liftIO $ modifyIORef' raccum (:|> (k, v1))
+                (b2, v2) <- runRecordT (fn b1 k v1) rt
+                liftIO $ modifyIORef' waccum (Map.insert k v2)
+                pure (b2, v2)
+            )
+            (\_ ->
+                fmap Just $ liftIO $ readIORef raccum
+            )
         wmap <- liftIO $ readIORef waccum
-        liftIO $ recordTraceRecordEvent rt "MonadKeyValue"
-            (Just ("traverseKVSatisfying", Aeson.toJSON rseq))
-            (Just (Aeson.toJSON ("traverseKVSatisfying" :: Text, wmap)))
-            (Just "traverseKVSatisfying")
+        recordTraceEventEffect rt
+            (MonadKeyValueEffectTraverseKV wmap)
+        recordTraceEventSyncPoint rt
+            MonadKeyValueSyncPointTraverseKV
         pure br
 
 
@@ -539,170 +842,355 @@ test = do
 
 func :: MonadKeyValue m => m ()
 func = do
+    _ <- getKV "a"
     setKV "a" "b"
     setKV "c" "d"
     mx <- getKV "a"
     setKV "e" $ maybe "" id mx
     traverseKVSatisfying (const True) () $ \() k v -> do
         pure ((), k <> v)
+    _ <- getKV "a"
+    _ <- getKV "c"
+    _ <- getKV "e"
+    _ <- getKV "g"
+    pure ()
+
+
+
+type PreparedTraceRequestMap =
+    Map.Map (TextTagged Aeson.Value) (Map.Map Int Aeson.Value)
+
+type PreparedTraceEffects =
+    Seq (TextTagged Aeson.Value)
+
+type PreparedTraceSyncPoints =
+    Map.Map (TextTagged Aeson.Value) IntSet.IntSet
+
+
+
+data PreparedTrace = PreparedTrace
+    { preparedTraceRequestMap :: !PreparedTraceRequestMap
+    , preparedTraceEffects :: !PreparedTraceEffects
+    , preparedTraceSyncPoints :: !PreparedTraceSyncPoints
+    }
+    deriving (Show, Eq, Ord, Generic)
+
+instance Semigroup PreparedTrace where
+    ptA <> ptB = PreparedTrace
+        { preparedTraceRequestMap =
+            Map.unionWith
+                Map.union
+                (preparedTraceRequestMap ptA)
+                (preparedTraceRequestMap ptB)
+        , preparedTraceEffects =
+            preparedTraceEffects ptA <>
+            preparedTraceEffects ptB
+        , preparedTraceSyncPoints =
+            Map.unionWith
+                IntSet.union
+                (preparedTraceSyncPoints ptA)
+                (preparedTraceSyncPoints ptB)
+        }
+
+instance Monoid PreparedTrace where
+    mempty = PreparedTrace
+        { preparedTraceRequestMap = Map.empty
+        , preparedTraceEffects = Seq.empty
+        , preparedTraceSyncPoints = Map.empty
+        }
+
+
+
+prepareTrace ::
+    Seq (TextTagged TraceEvent) ->
+    PreparedTrace
+prepareTrace eventSeq =
+    evalState
+        (getAp $ foldMap (Ap . onEvent) eventSeq)
+        (0 :: Int)
+  where
+    onEvent (TextTagged domain (TraceEventRequest key value)) = do
+        time <- get
+        pure $ mempty
+            { preparedTraceRequestMap =
+                Map.singleton (TextTagged domain key) (Map.singleton time value)
+            }
+    onEvent (TextTagged domain (TraceEventEffect effect)) = do
+        pure $ mempty
+            { preparedTraceEffects =
+                Seq.singleton (TextTagged domain effect)
+            }
+    onEvent (TextTagged domain (TraceEventSyncPoint marker)) = do
+        oldTime <- get
+        put $! (oldTime + 1)
+        pure $ mempty
+            { preparedTraceSyncPoints =
+                Map.singleton (TextTagged domain marker) (IntSet.singleton oldTime)
+            }
 
 
 
 data ReplayError
-    = ReplayErrorNoRequest Text Aeson.Value
+    = ReplayErrorRequestNotFound Text Aeson.Value
+    | ReplayErrorRequestParseFailed Text Aeson.Value Aeson.Value String
     deriving (Show)
 
 instance Exception ReplayError
 
 
-
 data ReplayContext = ReplayContext
-    { replayContextTimeTableTVar ::
-        TVar (Map.Map Text Int)
-    , replayContextSyncPoints ::
-        Map.Map (Text, Aeson.Value) IntSet.IntSet
-    , replayContextRequestMap ::
-        Map.Map (Text, Aeson.Value) (Map.Map Int Aeson.Value)
-    , replayContextEffectListTVar ::
-        TVar (Seq Aeson.Value)
+    { replayContextTimeTVar :: TVar Int
+    , replayContextRequestMap :: PreparedTraceRequestMap
+    , replayContextEffectsTVar :: TVar PreparedTraceEffects
+    , replayContextSyncPoints :: PreparedTraceSyncPoints
     }
 
+createReplayContext ::
+    PreparedTrace ->
+    IO ReplayContext
+createReplayContext pt =
+    ReplayContext
+        <$> newTVarIO 0
+        <*> pure (preparedTraceRequestMap pt)
+        <*> newTVarIO Seq.empty
+        <*> pure (preparedTraceSyncPoints pt)
 
 
-newtype Replay a = Replay
-    { runReplay ::
+
+newtype Replayer a = Replayer
+    { runReplayer ::
         ReplayContext -> IO (Either SomeException a)
     }
     deriving (Functor, Applicative, Monad, MonadThrow, MonadCatch, MonadMask)
         via (ReaderT ReplayContext (Catch.CatchT IO))
 
-class (MonadMask m) => MonadReplay m where
-    baseReplayTraceEvent ::
-        Text ->
-        MaybeI Aeson.Value hasreq ->
-        Maybe Aeson.Value ->
-        Maybe Aeson.Value ->
-        m (MaybeI Aeson.Value hasreq)
-    baseReplayIO ::
-        IO a ->
+class (MonadMask m) => MonadReplayer m where
+    baseReplayer ::
+        (ReplayContext -> IO (Either SomeException a)) ->
         m a
 
-instance MonadReplay Replay where
-    baseReplayTraceEvent domain mbiKey mbEffect mbMarker = Replay $ \rt ->
-        atomically $ do
-            oldTimeTable <- readTVar (replayContextTimeTableTVar rt)
-            let oldTime =
-                    fromMaybe 0 $
-                    Map.lookup domain oldTimeTable
-            forM_ mbMarker $ \marker -> do
-                let mbNewTime = do
-                        timeSet <-
-                            Map.lookup
-                                (domain, marker)
-                                (replayContextSyncPoints rt)
-                        IntSet.lookupGT oldTime timeSet
-                forM_ mbNewTime $ \newTime -> do
-                    writeTVar (replayContextTimeTableTVar rt) $!
-                        Map.insert domain newTime oldTimeTable
-            forM_ mbEffect $ \effect -> do
-                modifyTVar' (replayContextEffectListTVar rt)
-                    (:|> effect)
-            case mbiKey of
-                NothingI -> pure (Right NothingI)
-                JustI rkey -> do
-                    let mbSelectedResp = do
-                            responses <-
-                                Map.lookup
-                                    (domain, rkey)
-                                    (replayContextRequestMap rt)
-                            Map.lookupLE oldTime responses <|>
-                                Map.lookupMin responses
-                    case mbSelectedResp of
-                        Nothing ->
-                            throwSTM $ ReplayErrorNoRequest domain rkey
-                        Just (_, selectedResp) ->
-                            pure (Right (JustI selectedResp))
-    baseReplayIO a = Replay $ \_ -> Right <$> a
+instance MonadReplayer Replayer where
+    baseReplayer = Replayer
 
 
 
--- replayTraceEvent ::
-    -- Text ->
-    -- MaybeI Aeson.Value hasreq ->
-    -- Maybe Aeson.Value ->
-    -- Maybe Aeson.Value ->
-    -- m (MaybeI Aeson.Value hasreq)
+replayerLiftIO :: (MonadReplayer m) => IO a -> m a
+replayerLiftIO io = baseReplayer (\_ -> Right <$> io)
 
 
 
-instance MonadKeyValue Replay where
-    getKV k = do
-        vj <- fmap fromJustI $ baseReplayTraceEvent "MonadKeyValue"
-            (JustI (Aeson.toJSON ["getKV", k]))
-            Nothing
-            Nothing
-        case Aeson.fromJSON vj of
-            Aeson.Success v -> pure v
-            Aeson.Error e -> baseReplayIO $ fail e
+replayTraceEventRequestRaw ::
+    ReplayContext ->
+    Text ->
+    Aeson.Value ->
+    IO (Maybe Aeson.Value)
+replayTraceEventRequestRaw rt domain key =
+    atomically $ do
+        time <- readTVar (replayContextTimeTVar rt)
+        pure $ do
+            responses <-
+                Map.lookup (TextTagged domain key) (replayContextRequestMap rt)
+            (_, resp) <-
+                Map.lookupLE time responses <|> Map.lookupMin responses
+            Just resp
+
+replayTraceEventEffectRaw ::
+    ReplayContext ->
+    Text ->
+    Aeson.Value ->
+    IO ()
+replayTraceEventEffectRaw rt domain effect =
+    atomically $ do
+        modifyTVar'
+            (replayContextEffectsTVar rt)
+            (:|> TextTagged  domain effect)
+
+replayTraceEventSyncPointRaw ::
+    ReplayContext ->
+    Text ->
+    Aeson.Value ->
+    IO ()
+replayTraceEventSyncPointRaw rt domain marker = do
+    atomically $ do
+        oldTime <- readTVar (replayContextTimeTVar rt)
+        let mbNewTime = do
+                timeSet <-
+                    Map.lookup
+                        (TextTagged domain marker)
+                        (replayContextSyncPoints rt)
+                IntSet.lookupGT oldTime timeSet
+        case mbNewTime of
+            Just newTime ->
+                writeTVar (replayContextTimeTVar rt) newTime
+            Nothing ->
+                pure ()
+
+
+
+replayTraceEventRequest ::
+    forall r d m.
+    (TraceDomain d, Aeson.FromJSON r, MonadReplayer m) =>
+    TraceDomainRequest d ->
+    m r
+replayTraceEventRequest key =
+    baseReplayer $ \rt -> do
+        mbResultJson <-
+            replayTraceEventRequestRaw rt (domainName $ Proxy @d) (Aeson.toJSON key)
+        case mbResultJson of
+            Just resultJson ->
+                case
+                    Aeson.fromJSON resultJson ::
+                        Aeson.Result (Result (TraceDomainError d) r)
+                  of
+                    Aeson.Success (Success result) ->
+                        pure (Right result)
+                    Aeson.Success (Failure domErr) ->
+                        pure (Left (traceDomainErrorToException domErr))
+                    Aeson.Error errMsg ->
+                        throwM $ ReplayErrorRequestParseFailed
+                            (domainName $ Proxy @d)
+                            (Aeson.toJSON key)
+                            resultJson
+                            errMsg
+            Nothing ->
+                throwM $ ReplayErrorRequestNotFound
+                    (domainName $ Proxy @d)
+                    (Aeson.toJSON key)
+
+replayTraceEventEffect ::
+    forall d m.
+    (TraceDomain d, MonadReplayer m) =>
+    TraceDomainEffect d ->
+    m ()
+replayTraceEventEffect effect =
+    baseReplayer $ \rt -> do
+        replayTraceEventEffectRaw rt (domainName $ Proxy @d) (Aeson.toJSON effect)
+        pure (Right ())
+
+replayTraceEventSyncPoint ::
+    forall d m.
+    (TraceDomain d, MonadReplayer m) =>
+    TraceDomainSyncPoint d ->
+    m ()
+replayTraceEventSyncPoint marker =
+    baseReplayer $ \rt -> do
+        replayTraceEventSyncPointRaw rt (domainName $ Proxy @d) (Aeson.toJSON marker)
+        pure (Right ())
+
+
+
+instance MonadKeyValue Replayer where
+    getKV k =
+        replayTraceEventRequest
+            (MonadKeyValueRequestGetKV k)
     setKV k v = do
-        fmap fromNothingI $ baseReplayTraceEvent "MonadKeyValue"
-            NothingI
-            (Just (Aeson.toJSON ("setKV" :: Text, k, v)))
-            (Just "setKV")
+        replayTraceEventEffect
+            (MonadKeyValueEffectSetKV k v)
+        replayTraceEventSyncPoint
+            MonadKeyValueSyncPointSetKV
     traverseKVSatisfying _ b0 fn = do
-        vsj <- fmap fromJustI $ baseReplayTraceEvent "MonadKeyValue"
-            (JustI "traverseKVSatisfying")
-            Nothing
-            Nothing
-        vs <- case Aeson.fromJSON vsj of
-            Aeson.Success vs -> pure (vs :: Seq (Text, Text))
-            Aeson.Error e -> baseReplayIO $ fail e
-        waccum <- baseReplayIO $ newIORef Map.empty
+        vs <- replayTraceEventRequest
+            MonadKeyValueRequestTraverseKV
+        waccum <- replayerLiftIO $ newIORef Map.empty
         br <- foldlM
             (\b1 (k, v1) -> do
                 (b2, v2) <- fn b1 k v1
-                baseReplayIO $ modifyIORef' waccum (Map.insert k v2)
+                replayerLiftIO $ modifyIORef' waccum (Map.insert k v2)
                 pure b2
             )
             b0
-            vs
-        wmap <- baseReplayIO $ readIORef waccum
-        fmap fromNothingI $ baseReplayTraceEvent "MonadKeyValue"
-            NothingI
-            (Just (Aeson.toJSON ("traverseKVSatisfying" :: Text, wmap)))
-            Nothing
+            (vs :: Seq (Text, Text))
+        wmap <- replayerLiftIO $ readIORef waccum
+        replayTraceEventEffect
+            (MonadKeyValueEffectTraverseKV wmap)
+        replayTraceEventSyncPoint
+            MonadKeyValueSyncPointTraverseKV
         pure br
 
 
 
-test2 :: IO ()
-test2 = do
-    tttv <- newTVarIO Map.empty
-    etv <- newTVarIO Seq.empty
-    let rt = ReplayContext
-            { replayContextTimeTableTVar = tttv
-            , replayContextSyncPoints = Map.fromList
-                [ (("MonadKeyValue", "setKV"), IntSet.fromList [1, 2, 3])
-                , (("MonadKeyValue", "traverseKVSatisfying"), IntSet.fromList [4])
-                ]
-            , replayContextRequestMap = Map.fromList
-                [ ( ("MonadKeyValue", Aeson.toJSON ("getKV" :: Text, "a" :: Text))
-                  , Map.fromList
-                    [ (2, "b")
-                    ]
-                  )
-                , ( ("MonadKeyValue", "traverseKVSatisfying")
-                  , Map.fromList
-                    [ (3, Aeson.toJSON [("a" :: Text, "b" :: Text), ("c", "d"), ("e", "b")])
-                    ]
-                  )
-                ]
-            , replayContextEffectListTVar = etv
-            }
-    er <- flip runReplay rt $ do
+unJSON :: (Aeson.FromJSON a) => Aeson.Value -> a
+unJSON j = case Aeson.fromJSON j of
+    Aeson.Success x -> x
+    Aeson.Error e -> error e
+
+testTrace :: Seq (TextTagged TraceEvent)
+testTrace = unJSON $ [Yaml.TH.yamlQQ|
+  - MonadKeyValue:
+      request:
+      - getKV: a
+      - success: null
+  - MonadKeyValue:
+      effect:
+        setKV:
+        - a
+        - b
+  - MonadKeyValue:
+      syncPoint: setKV
+  - MonadKeyValue:
+      effect:
+        setKV:
+        - c
+        - d
+  - MonadKeyValue:
+      syncPoint: setKV
+  - MonadKeyValue:
+      request:
+      - getKV: a
+      - success: b
+  - MonadKeyValue:
+      effect:
+        setKV:
+        - e
+        - b
+  - MonadKeyValue:
+      syncPoint: setKV
+  - MonadKeyValue:
+      request:
+      - traverseKV: []
+      - success:
+        - - a
+          - b
+        - - c
+          - d
+        - - e
+          - b
+  - MonadKeyValue:
+      effect:
+        traverseKV:
+          a: ab
+          c: cd
+          e: eb
+  - MonadKeyValue:
+      syncPoint: traverseKV
+  - MonadKeyValue:
+      request:
+      - getKV: a
+      - success: ab
+  - MonadKeyValue:
+      request:
+      - getKV: c
+      - success: cd
+  - MonadKeyValue:
+      request:
+      - getKV: e
+      - success: eb
+  - MonadKeyValue:
+      request:
+      - getKV: g
+      - success: null
+  |]
+
+preparedTestTrace :: PreparedTrace
+preparedTestTrace = prepareTrace testTrace
+
+
+
+testReplay :: IO ()
+testReplay = do
+    rt <- createReplayContext preparedTestTrace
+    er <- flip runReplayer rt $ do
         func
-    atomically (readTVar etv) >>= BS.Char8.putStrLn . renderYaml
+    effects <- atomically $ readTVar (replayContextEffectsTVar rt)
+    BS.Char8.putStrLn $ renderYaml effects
     print er
-
-
-

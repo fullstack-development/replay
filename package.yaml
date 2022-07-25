@@ -22,15 +22,31 @@ description: Please see the README on GitHub at <https://github.com/fullstack-de
 dependencies:
 - base >= 4.7 && < 5
 - aeson
+- async
+- base-encoding
 - beam-core
 - beam-postgres
+- binary
 - bytestring
+- case-insensitive
 - containers
+- cryptonite
+- deepseq
 - exceptions
 - free
+- http-client
+- http-media
+- http-types
+- kan-extensions
 - mtl
 - postgresql-simple
 - reducible
+- servant
+- servant-client
+- servant-client-core
+- servant-server
+- servant-websockets
+- streaming-commons
 - stm
 - template-haskell
 - text
@@ -38,6 +54,9 @@ dependencies:
 - transformers
 - unordered-containers
 - yaml
+- wai
+- warp
+- websockets
 
 library:
   source-dirs: src
