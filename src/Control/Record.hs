@@ -977,6 +977,9 @@ instance MonadReplayer Replayer where
 replayerLiftIO :: (MonadReplayer m) => IO a -> m a
 replayerLiftIO io = baseReplayer (\_ -> Right <$> io)
 
+askReplayContext :: (MonadReplayer m) => m ReplayContext
+askReplayContext = baseReplayer (pure . Right)
+
 
 
 replayTraceEventRequestRaw ::
