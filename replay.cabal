@@ -33,7 +33,9 @@ library
       Encoding
       Servant.Client.Test
       Servant.Client.Traced
-      Servant.Client.Traced.RandomId
+      Servant.Client.Traced.ClientFC
+      Servant.Client.Traced.ReqId
+      Servant.Client.Traced.Serialization
       Servant.Client.Traced.SerializedByteString
   other-modules:
       Paths_replay

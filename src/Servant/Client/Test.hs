@@ -85,7 +85,6 @@ import qualified Servant.Client.Core.RunClient
 import qualified Servant.Client.Streaming
 import qualified Servant.Client.Traced as Traced
 import qualified Servant.Client.Traced.SerializedByteString as SBS
-import qualified Servant.Client.Traced.RandomId as RandomId
 import qualified Servant.Types.SourceT as SourceT
 import qualified System.IO.Unsafe
 

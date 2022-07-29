@@ -1,15 +1,23 @@
-module Servant.Client.Traced.RandomId
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
+module Servant.Client.Traced.ReqId
     (
-      generateRandomId
+      ReqId (..)
+    , generateReqId
     )
 where
 
 import Data.IORef
 import qualified Codec.Base16
 import qualified Crypto.Random as Random
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.Text as Text
 import qualified System.IO.Unsafe
+
+newtype ReqId = ReqId Text.Text
+  deriving newtype (Show, Eq, Ord, Aeson.FromJSON, Aeson.ToJSON)
 
 generatorStateIORef :: IORef Random.ChaChaDRG
 generatorStateIORef = System.IO.Unsafe.unsafePerformIO $ do
@@ -27,5 +35,5 @@ generateHexText :: Int -> IO Text.Text
 generateHexText n =
     Codec.Base16.encode <$> generateBytes n
 
-generateRandomId :: IO Text.Text
-generateRandomId = generateHexText 8
+generateReqId :: IO ReqId
+generateReqId = ReqId <$> generateHexText 8
